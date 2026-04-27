@@ -5,11 +5,12 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
+from twilio_handler import TwilioMediaBridge
 
 # Load environment variables
 load_dotenv()
@@ -189,6 +190,62 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         receive_task.cancel()
         # Ensure websocket is closed if not already
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
+# ============ TWILIO VOICE ENDPOINTS ============
+
+@app.post("/twilio/voice")
+async def twilio_voice(request: Request):
+    """Twilio webhook: when someone calls your Twilio number, this answers."""
+    host = request.headers.get("host", "localhost")
+    protocol = "wss" if request.url.scheme == "https" or "onrender.com" in host else "ws"
+    ws_url = f"{protocol}://{host}/twilio/media-stream"
+
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{ws_url}">
+            <Parameter name="caller" value="{{{{From}}}}" />
+        </Stream>
+    </Connect>
+</Response>"""
+
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.websocket("/twilio/media-stream")
+async def twilio_media_stream(websocket: WebSocket):
+    """WebSocket endpoint for Twilio Media Streams."""
+    await websocket.accept()
+    logger.info("Twilio Media Stream WebSocket accepted")
+
+    gemini_client = GeminiLive(
+        api_key=GEMINI_API_KEY,
+        model=MODEL,
+        input_sample_rate=16000,
+        tool_mapping={
+            "get_vehicle_info": handle_get_vehicle_info,
+            "schedule_pickup": handle_schedule_pickup,
+            "get_service_cost_estimate": handle_get_service_cost_estimate,
+        }
+    )
+
+    bridge = TwilioMediaBridge(
+        websocket=websocket,
+        gemini_client=gemini_client,
+        text_trigger="Hi, I have picked up the phone. Please start the call.",
+    )
+
+    try:
+        await bridge.run()
+    except Exception as e:
+        import traceback
+        logger.error(f"Twilio bridge error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
         try:
             await websocket.close()
         except:
