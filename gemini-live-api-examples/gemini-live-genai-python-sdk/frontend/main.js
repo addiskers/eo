@@ -360,6 +360,58 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// --- Call Me (Twilio outbound) ---
+const phoneInput = document.getElementById("phoneInput");
+const callMeBtn = document.getElementById("callMeBtn");
+const callMeStatus = document.getElementById("callMeStatus");
+
+if (callMeBtn) {
+  callMeBtn.onclick = async () => {
+    let phone = phoneInput.value.trim();
+    if (!phone) {
+      callMeStatus.textContent = "Enter your phone number";
+      callMeStatus.className = "call-me-status error";
+      return;
+    }
+    // Auto-add +91 if user just typed digits
+    phone = phone.replace(/[\s\-()]/g, "");
+    if (!phone.startsWith("+")) {
+      phone = "+91" + phone;
+    }
+
+    callMeBtn.disabled = true;
+    callMeStatus.textContent = "Calling...";
+    callMeStatus.className = "call-me-status loading";
+
+    try {
+      const res = await fetch("/call-me", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        callMeStatus.textContent = "Calling " + phone + " — pick up your phone!";
+        callMeStatus.className = "call-me-status success";
+      } else {
+        callMeStatus.textContent = data.error || "Failed to call";
+        callMeStatus.className = "call-me-status error";
+      }
+    } catch (e) {
+      callMeStatus.textContent = "Network error: " + e.message;
+      callMeStatus.className = "call-me-status error";
+    }
+    callMeBtn.disabled = false;
+  };
+
+  // Enter key triggers call
+  if (phoneInput) {
+    phoneInput.onkeypress = (e) => {
+      if (e.key === "Enter") callMeBtn.click();
+    };
+  }
+}
+
 // --- Connect ---
 connectBtn.onclick = async () => {
   setStatus("disconnected", "Connecting...");

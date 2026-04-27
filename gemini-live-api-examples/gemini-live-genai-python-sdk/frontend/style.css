@@ -333,6 +333,91 @@ body::before {
   color: var(--text-muted);
 }
 
+/* Divider */
+.divider-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.divider-or::before, .divider-or::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--glass-border);
+}
+
+/* Phone call section */
+.phone-call-section {
+  width: 100%;
+}
+.phone-call-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.phone-input-row {
+  display: flex;
+  gap: 8px;
+}
+.phone-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.phone-input::placeholder {
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+}
+.phone-input:focus {
+  border-color: rgba(0, 212, 255, 0.4);
+}
+.call-me-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent-cyan), #0099cc);
+  color: var(--bg-primary);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+.call-me-btn:hover {
+  transform: scale(1.03);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.3);
+}
+.call-me-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.call-me-status {
+  font-size: 0.75rem;
+  margin-top: 8px;
+  min-height: 1.2em;
+}
+.call-me-status.success { color: var(--accent-success); }
+.call-me-status.error { color: var(--accent-danger); }
+.call-me-status.loading { color: var(--accent-cyan); }
+
 /* ===== ACTIVE CALL DASHBOARD ===== */
 .app-section {
   flex: 1;
