@@ -2,10 +2,28 @@ import asyncio
 import inspect
 import logging
 import traceback
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 from google import genai
 from google.genai import types
+
+
+def get_system_instruction():
+    today = datetime.now()
+    tomorrow = today + timedelta(days=1)
+    day_after = today + timedelta(days=2)
+
+    date_context = f"""## TODAY'S DATE — USE THIS FOR ALL SCHEDULING
+- Today is {today.strftime('%Y-%m-%d')} ({today.strftime('%A')}).
+- "Kal" / "Tomorrow" = {tomorrow.strftime('%Y-%m-%d')} ({tomorrow.strftime('%A')}).
+- "Parso" / "Day after tomorrow" = {day_after.strftime('%Y-%m-%d')} ({day_after.strftime('%A')}).
+- Use TODAY as the reference for ALL pickup scheduling. NEVER confuse pickup dates with warranty, purchase, or service history dates — those are COMPLETELY DIFFERENT.
+- Pickup dates are ALWAYS in the near future (within 1-2 weeks from today).
+"""
+
+    return date_context + SYSTEM_INSTRUCTION
+
 
 SYSTEM_INSTRUCTION = """
 ## YOUR FIXED IDENTITY — DO NOT CHANGE
@@ -72,6 +90,7 @@ As soon as the call begins, IMMEDIATELY call the get_vehicle_info tool. Once you
 - Keep responses to 1-2 sentences. This is a phone call.
 - Remember everything the customer says during the call.
 - If customer is busy, offer to call back later.
+- PICKUP DATE RULE: When the customer says a date for pickup, it MUST be a date in the near future (today or later, within the next 14 days). NEVER use warranty_expiry, purchase_date, or service history dates as pickup dates. If the customer says "14 ko" or "14th", it means the 14th of the CURRENT month (relative to today's date above), NOT October or any other month from the vehicle data. If unsure, ask the customer to clarify.
 """
 
 TOOLS = [
@@ -149,7 +168,7 @@ class GeminiLive:
                     )
                 )
             ),
-            system_instruction=types.Content(parts=[types.Part(text=SYSTEM_INSTRUCTION)]),
+            system_instruction=types.Content(parts=[types.Part(text=get_system_instruction())]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             realtime_input_config=types.RealtimeInputConfig(
