@@ -210,7 +210,7 @@ async def websocket_endpoint(websocket: WebSocket):
 async def twilio_voice(request: Request):
     """Twilio webhook: when someone calls your Twilio number, this answers."""
     host = request.headers.get("host", "localhost")
-    protocol = "wss" if request.url.scheme == "https" or "onrender.com" in host else "ws"
+    protocol = "wss" if request.url.scheme == "https" or "onrender.com" in host or "globalvoxinc.ai" in host else "ws"
     ws_url = f"{protocol}://{host}/twilio/media-stream"
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
