@@ -33,7 +33,7 @@ TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+19785715824")
 VEHICLES = {
     "default": {
         "vehicle_number": "GJ05GT0903",
-        "owner_name": "Dashrath Patel",
+        "owner_name": "Chetan Seth",
         "phone": "+919876543210",
         "model": "Maruti Suzuki Baleno",
         "year": 2024,
