@@ -105,7 +105,27 @@ class MediaHandler {
       this.audioWorkletNode.disconnect();
       this.audioWorkletNode = null;
     }
-    this.inputAnalyser = null;
+    if (this.inputAnalyser) {
+      this.inputAnalyser.disconnect();
+      this.inputAnalyser = null;
+    }
+    if (this.outputAnalyser) {
+      this.outputAnalyser.disconnect();
+      this.outputAnalyser = null;
+    }
+    if (this.outputGain) {
+      this.outputGain.disconnect();
+      this.outputGain = null;
+    }
+    if (this.audioContext && this.audioContext.state !== "closed") {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.nextStartTime = 0;
+    this.scheduledSources.forEach((s) => {
+      try { s.stop(); s.disconnect(); } catch (e) {}
+    });
+    this.scheduledSources = [];
   }
 
   async startVideo(videoElement, onFrame) {

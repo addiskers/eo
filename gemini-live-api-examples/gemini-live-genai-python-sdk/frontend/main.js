@@ -296,7 +296,14 @@ function renderBookingPanel(data) {
 
 // --- Message Handling ---
 function handleJsonMessage(msg) {
-  if (msg.type === "interrupted") {
+  if (msg.type === "status") {
+    const statusMsgDiv = document.createElement("div");
+    statusMsgDiv.className = "message system";
+    statusMsgDiv.innerHTML = `<span class="msg-text" style="color:#f59e0b;font-style:italic;">${escapeHtml(msg.text)}</span>`;
+    chatLog.appendChild(statusMsgDiv);
+    chatLog.scrollTop = chatLog.scrollHeight;
+    return;
+  } else if (msg.type === "interrupted") {
     mediaHandler.stopAudioPlayback();
     currentGeminiMessageDiv = null;
     currentUserMessageDiv = null;

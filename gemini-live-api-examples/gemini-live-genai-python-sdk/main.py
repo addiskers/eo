@@ -17,8 +17,8 @@ load_dotenv()
 
 # Configure logging - DEBUG for our modules, INFO for everything else
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("gemini_live").setLevel(logging.DEBUG)
-logging.getLogger(__name__).setLevel(logging.DEBUG)
+logging.getLogger("gemini_live").setLevel(logging.INFO)
+logging.getLogger(__name__).setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -133,16 +133,21 @@ async def websocket_endpoint(websocket: WebSocket):
     video_input_queue = asyncio.Queue()
     text_input_queue = asyncio.Queue()
 
+    client_disconnected = False
+
     async def audio_output_callback(data):
-        await websocket.send_bytes(data)
+        if not client_disconnected:
+            try:
+                await websocket.send_bytes(data)
+            except Exception:
+                pass
 
     async def audio_interrupt_callback():
-        # The event queue handles the JSON message, but we might want to do something else here
         pass
 
     gemini_client = GeminiLive(
-        api_key=GEMINI_API_KEY, 
-        model=MODEL, 
+        api_key=GEMINI_API_KEY,
+        model=MODEL,
         input_sample_rate=16000,
         tool_mapping={
             "get_vehicle_info": handle_get_vehicle_info,
@@ -151,7 +156,10 @@ async def websocket_endpoint(websocket: WebSocket):
         }
     )
 
+    session_task = None
+
     async def receive_from_client():
+        nonlocal client_disconnected
         try:
             while True:
                 message = await websocket.receive()
@@ -175,33 +183,78 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.info("WebSocket disconnected")
         except Exception as e:
             logger.error(f"Error receiving from client: {e}")
+        finally:
+            client_disconnected = True
+            if session_task and not session_task.done():
+                session_task.cancel()
 
     receive_task = asyncio.create_task(receive_from_client())
 
-    async def run_session():
-        async for event in gemini_client.start_session(
-            audio_input_queue=audio_input_queue,
-            video_input_queue=video_input_queue,
-            text_input_queue=text_input_queue,
-            audio_output_callback=audio_output_callback,
-            audio_interrupt_callback=audio_interrupt_callback,
-        ):
-            if event:
-                # Forward events (transcriptions, etc) to client
-                await websocket.send_json(event)
+    MAX_RETRIES = 3
+    RETRY_DELAYS = [2, 4, 8]
+
+    async def run_session_with_retry():
+        for attempt in range(MAX_RETRIES + 1):
+            should_retry = False
+            try:
+                async for event in gemini_client.start_session(
+                    audio_input_queue=audio_input_queue,
+                    video_input_queue=video_input_queue,
+                    text_input_queue=text_input_queue,
+                    audio_output_callback=audio_output_callback,
+                    audio_interrupt_callback=audio_interrupt_callback,
+                ):
+                    if event:
+                        if event.get("type") == "error" and attempt < MAX_RETRIES:
+                            error_msg = event.get("error", "")
+                            if "exhausted" in error_msg or "quota" in error_msg.lower():
+                                delay = RETRY_DELAYS[attempt]
+                                logger.warning(f"Quota error, retrying in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
+                                try:
+                                    await websocket.send_json({"type": "status", "text": "Reconnecting..."})
+                                except RuntimeError:
+                                    return
+                                await asyncio.sleep(delay)
+                                should_retry = True
+                                break
+                        if event.get("type") == "go_away" and attempt < MAX_RETRIES:
+                            logger.info(f"GoAway received, reconnecting (attempt {attempt+1}/{MAX_RETRIES})")
+                            try:
+                                await websocket.send_json({"type": "status", "text": "Reconnecting..."})
+                            except RuntimeError:
+                                return
+                            await asyncio.sleep(1)
+                            should_retry = True
+                            break
+                        try:
+                            await websocket.send_json(event)
+                        except RuntimeError:
+                            return
+                if not should_retry:
+                    return
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    logger.warning(f"Session error, retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
 
     try:
-        await run_session()
+        session_task = asyncio.create_task(run_session_with_retry())
+        await session_task
+    except asyncio.CancelledError:
+        logger.info("Gemini session cancelled due to client disconnect")
     except Exception as e:
         import traceback
         logger.error(f"Error in Gemini session: {type(e).__name__}: {e}\n{traceback.format_exc()}")
     finally:
         receive_task.cancel()
-        # Ensure websocket is closed if not already
         try:
             await websocket.close()
         except:
             pass
+        logger.info("connection closed")
 
 
 # ============ TWILIO VOICE ENDPOINTS ============
