@@ -59,9 +59,9 @@ const geminiClient = new GeminiClient({
 
     startTimer();
     startOrb();
-    setCaption("Radha is here", "Say hello…");
+    setCaption("Connected", "Say hello…");
 
-    // Make Radha speak first, then open the mic.
+    // Let EO Gujarat speak first, then open the mic.
     geminiClient.sendText(GREETING_TRIGGER);
     startMic();
   },
@@ -73,10 +73,10 @@ const geminiClient = new GeminiClient({
         console.error("Parse error:", e);
       }
     } else {
-      // Binary = Radha's audio
+      // Binary = agent audio
       if (!radhaSpeaking) {
         radhaSpeaking = true;
-        setCaption("Radha is speaking…", "An Evening with Radha");
+        setCaption("Speaking…", "EO Gujarat invitation");
       }
       mediaHandler.playAudio(event.data);
     }
@@ -189,7 +189,7 @@ function renderRSVP(result) {
     rsvpCard.classList.add("coming");
     rsvpEmoji.textContent = "🎉";
     rsvpTitle.textContent = rsvpData.guest_name ? `See you, ${rsvpData.guest_name}!` : "You're coming!";
-    rsvpSub.textContent = "Radha can't wait to see you on the 10th.";
+    rsvpSub.textContent = "We can't wait to see you on the 10th.";
   } else {
     rsvpCard.classList.add("declined");
     rsvpEmoji.textContent = "💛";
@@ -213,7 +213,7 @@ function handleJsonMessage(msg) {
     case "turn_complete":
       radhaSpeaking = false;
       endTurns();
-      setCaption("Listening…", "Tell Radha “Yes” or “No”");
+      setCaption("Listening…", "Say “Yes” or “No”");
       break;
     case "user":
       addChunk("user", msg.text);
@@ -388,7 +388,7 @@ function showSessionEnd() {
   if (rsvpData && rsvpData.attending) {
     badgeCls = "coming"; badgeText = "Coming on the 10th";
     emoji = "🎉"; title = "See you on the 10th!";
-    line = "Radha is so glad you're coming to the EO Gujarat evening.";
+    line = "We're so glad you're coming to the EO Gujarat evening.";
   } else if (rsvpData && !rsvpData.attending) {
     badgeCls = "declined"; badgeText = "Not this time";
     emoji = "💛"; title = "We'll miss you";
@@ -419,7 +419,7 @@ function showSessionEnd() {
       </button>
       <div class="tr-full">`;
     for (const e of callTranscript) {
-      const roleLabel = e.role === "user" ? "Guest" : "Radha";
+      const roleLabel = e.role === "user" ? "Guest" : "EO Gujarat";
       html += `<div class="tr-line tr-${e.role}">
         <span class="tr-time">${escapeHtml(e.time)}</span>
         <span class="tr-role">${roleLabel}:</span>
@@ -454,7 +454,7 @@ function resetUI() {
   rsvpCard.className = "rsvp-card glass pending";
   rsvpEmoji.textContent = "💌";
   rsvpTitle.textContent = "Awaiting your answer";
-  rsvpSub.textContent = "Just tell Radha “Yes” or “No”.";
+  rsvpSub.textContent = "Just say “Yes” or “No”.";
   callTimerEl.textContent = "00:00";
   micBtn.classList.add("active");
   micBtn.dataset.active = "true";

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import secrets
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -13,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
-from twilio_handler import TwilioMediaBridge
+from plivo_handler import PlivoMediaBridge
 
 import pricing
 import store
@@ -31,22 +32,22 @@ logger = logging.getLogger(__name__)
 # Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL = os.getenv("MODEL", "gemini-3.1-flash-live-preview")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+19785715824")
+PLIVO_AUTH_ID = os.getenv("PLIVO_AUTH_ID")
+PLIVO_AUTH_TOKEN = os.getenv("PLIVO_AUTH_TOKEN")
+PLIVO_FROM_NUMBER = os.getenv("PLIVO_FROM_NUMBER", "")
 ANALYTICS_SECRET = os.getenv("ANALYTICS_SECRET", "eo2026")
 
 # ============ EVENT / GUEST DATA ============
 
 EVENT = {
     "host": "EO Gujarat",
-    "occasion": "An unforgettable evening",
+    "occasion": "Inaugural evening with Varun Dhawan",
     "date": "10th July",
     "city": "Ahmedabad",
 }
 
 def handle_record_rsvp(**kwargs):
-    """Radha calls this the moment the guest says Yes or No."""
+    """The agent calls this the moment the guest says Yes or No."""
     return {
         "success": True,
         "attending": bool(kwargs.get("attending")),
@@ -227,32 +228,37 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("connection closed")
 
 
-# ============ TWILIO VOICE ENDPOINTS ============
+# ============ PLIVO VOICE ENDPOINTS ============
 
-@app.api_route("/twilio/voice", methods=["GET", "POST"])
-async def twilio_voice(request: Request):
-    """Twilio webhook: when someone calls your Twilio number, this answers."""
+@app.api_route("/plivo/answer", methods=["GET", "POST"])
+async def plivo_answer(request: Request):
+    """Plivo answer webhook: returns streaming XML when the callee picks up."""
     host = request.headers.get("host", "localhost")
     protocol = "wss" if request.url.scheme == "https" or "onrender.com" in host or "globalvoxinc.ai" in host else "ws"
-    ws_url = f"{protocol}://{host}/twilio/media-stream"
+    ws_url = f"{protocol}://{host}/plivo/media-stream"
 
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="{ws_url}">
-            <Parameter name="caller" value="{{{{From}}}}" />
-        </Stream>
-    </Connect>
-</Response>"""
+    caller = request.query_params.get("caller", "")
+    extra_headers = f"X-Caller={quote(caller)}" if caller else ""
+    eh_attr = f' extraHeaders="{extra_headers}"' if extra_headers else ""
 
-    return Response(content=twiml, media_type="application/xml")
+    # Plivo <Stream>: URL is the element TEXT (not a url= attr); audioTrack must be
+    # "inbound" with bidirectional="true"; codec mulaw 8kHz.
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Response>\n'
+        '  <Stream bidirectional="true" keepCallAlive="true" '
+        f'contentType="audio/x-mulaw;rate=8000" audioTrack="inbound"{eh_attr}>'
+        f'{ws_url}</Stream>\n'
+        '</Response>'
+    )
+    return Response(content=xml, media_type="application/xml")
 
 
-@app.websocket("/twilio/media-stream")
-async def twilio_media_stream(websocket: WebSocket):
-    """WebSocket endpoint for Twilio Media Streams."""
+@app.websocket("/plivo/media-stream")
+async def plivo_media_stream(websocket: WebSocket):
+    """WebSocket endpoint for Plivo bidirectional Audio Streaming."""
     await websocket.accept()
-    logger.info("Twilio Media Stream WebSocket accepted")
+    logger.info("Plivo Media Stream WebSocket accepted")
 
     gemini_client = GeminiLive(
         api_key=GEMINI_API_KEY,
@@ -270,7 +276,7 @@ async def twilio_media_stream(websocket: WebSocket):
         # Persist (never let a recorder failure affect the live broadcast).
         etype = event.get("type")
         if etype == "call_start":
-            await recorder.open(source="twilio", call_sid=event.get("call_sid") or None,
+            await recorder.open(source="plivo", call_sid=event.get("call_sid") or None,
                                 caller=event.get("caller"))
         elif etype == "call_end":
             await recorder.close()
@@ -285,7 +291,7 @@ async def twilio_media_stream(websocket: WebSocket):
                 dead.add(watcher)
         live_watchers.difference_update(dead)
 
-    bridge = TwilioMediaBridge(
+    bridge = PlivoMediaBridge(
         websocket=websocket,
         gemini_client=gemini_client,
         text_trigger="[The guest has just answered the call. Greet them now with your invitation.]",
@@ -296,7 +302,7 @@ async def twilio_media_stream(websocket: WebSocket):
         await bridge.run()
     except Exception as e:
         import traceback
-        logger.error(f"Twilio bridge error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        logger.error(f"Plivo bridge error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
     finally:
         try:
             await websocket.close()
@@ -306,37 +312,43 @@ async def twilio_media_stream(websocket: WebSocket):
 
 @app.post("/call-me")
 async def call_me(request: Request):
-    """Make Twilio call a phone number and connect to the AI agent."""
-    from twilio.rest import Client
+    """Make Plivo call a phone number and connect to the AI agent."""
+    import plivo
 
     body = await request.json()
     to_number = body.get("phone")
     if not to_number:
         return {"error": "Missing 'phone' field. Send {\"phone\": \"+91XXXXXXXXXX\"}"}
 
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        return {"error": "Twilio credentials not configured"}
+    if not PLIVO_AUTH_ID or not PLIVO_AUTH_TOKEN:
+        return {"error": "Plivo credentials not configured"}
+    if not PLIVO_FROM_NUMBER:
+        return {"error": "PLIVO_FROM_NUMBER not configured"}
 
-    # Use PUBLIC_URL env var or Render URL — Twilio can't reach localhost
+    # Plivo must be able to reach the answer webhook publicly (not localhost).
     public_url = os.getenv("PUBLIC_URL", "")
     if public_url:
-        webhook_url = f"{public_url}/twilio/voice"
+        base = public_url.rstrip("/")
     else:
         host = request.headers.get("host", "localhost")
         protocol = "https" if "onrender.com" in host else request.url.scheme
-        webhook_url = f"{protocol}://{host}/twilio/voice"
+        base = f"{protocol}://{host}"
+    answer_url = f"{base}/plivo/answer?caller={quote(to_number)}"
 
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        call = client.calls.create(
-            to=to_number,
-            from_=TWILIO_PHONE_NUMBER,
-            url=webhook_url,
+        client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
+        resp = client.calls.create(
+            from_=PLIVO_FROM_NUMBER,
+            to_=to_number,
+            answer_url=answer_url,
+            answer_method="GET",
         )
-        logger.info(f"Outbound call initiated: {call.sid} to {to_number}")
-        return {"success": True, "call_sid": call.sid, "to": to_number}
+        call_uuid = getattr(resp, "request_uuid", None) or (
+            resp.get("request_uuid") if isinstance(resp, dict) else None)
+        logger.info(f"Outbound Plivo call initiated: {call_uuid} to {to_number}")
+        return {"success": True, "call_uuid": call_uuid, "to": to_number}
     except Exception as e:
-        logger.error(f"Failed to initiate call: {e}")
+        logger.error(f"Failed to initiate Plivo call: {e}")
         return {"error": str(e)}
 
 
@@ -793,7 +805,7 @@ tbody tr:hover{background:rgba(0,212,255,0.05);}
     <div class="filters">
       <input type="date" id="fromDate" title="From date"/>
       <input type="date" id="toDate" title="To date"/>
-      <select id="sourceFilter"><option value="">All sources</option><option value="twilio">Phone (Twilio)</option><option value="browser">Browser</option></select>
+      <select id="sourceFilter"><option value="">All sources</option><option value="plivo">Phone (Plivo)</option><option value="browser">Browser</option></select>
       <input class="grow" id="search" placeholder="Search caller / call SID…"/>
       <button class="btn ghost" id="csvBtn">Export CSV</button>
     </div>

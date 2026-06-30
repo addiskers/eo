@@ -4,4 +4,4 @@ google-genai
 websockets
 python-dotenv
 python-multipart
-twilio
+plivo
