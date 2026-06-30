@@ -190,7 +190,9 @@ class CallRecorder:
             "result": result,
             "ts": _now_iso(),
         })
-        if name == "schedule_pickup" and isinstance(result, dict) and result.get("success"):
+        # Positive outcome for this demo = guest RSVP'd "yes" (reuses the
+        # existing booking_created flag so the admin dashboard keeps working).
+        if name == "record_rsvp" and isinstance(result, dict) and result.get("attending"):
             self.call["booking_created"] = True
 
     def _accumulate_usage(self, event):

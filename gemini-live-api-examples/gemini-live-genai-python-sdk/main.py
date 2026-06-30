@@ -34,77 +34,26 @@ MODEL = os.getenv("MODEL", "gemini-3.1-flash-live-preview")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+19785715824")
-ANALYTICS_SECRET = os.getenv("ANALYTICS_SECRET", "kataria2026")
+ANALYTICS_SECRET = os.getenv("ANALYTICS_SECRET", "eo2026")
 
-# ============ MOCK BACKEND DATA ============
+# ============ EVENT / GUEST DATA ============
 
-VEHICLES = {
-    "default": {
-        "vehicle_number": "GJ05GT0903",
-        "owner_name": "Chetan Seth",
-        "phone": "+919876543210",
-        "model": "Maruti Suzuki Baleno",
-        "year": 2024,
-        "purchase_date": "2024-10-30",
-        "warranty_expiry": "2026-10-30",
-        "warranty_active": True,
-        "current_km_system": 8604,
-        "service_history": [
-            {
-                "service_number": 1,
-                "date": "2025-02-15",
-                "km": 1023,
-                "workshop": "Kataria Automobiles, Ahmedabad",
-                "type": "First Free Service",
-                "cost": 0
-            },
-            {
-                "service_number": 2,
-                "date": "2025-08-20",
-                "km": 5111,
-                "workshop": "Karodhra Workshop",
-                "type": "Second Service",
-                "cost": 2200
-            }
-        ],
-        "next_service": {
-            "service_number": 3,
-            "type": "Third Service",
-            "due_km": 10000,
-            "estimated_cost_min": 2500,
-            "estimated_cost_max": 3000
-        },
-        "pickup_drop_free": True,
-        "address": "B-101, Sterling City , Ahmedabad"
-    }
+EVENT = {
+    "host": "EO Gujarat",
+    "occasion": "An unforgettable evening",
+    "date": "10th July",
+    "city": "Ahmedabad",
 }
 
-def handle_get_vehicle_info(**kwargs):
-    return VEHICLES["default"]
-
-def handle_schedule_pickup(**kwargs):
+def handle_record_rsvp(**kwargs):
+    """Radha calls this the moment the guest says Yes or No."""
     return {
         "success": True,
-        "booking_id": "BK-20260413-001",
-        "vehicle_number": kwargs.get("vehicle_number", "GJ05GT0903"),
-        "pickup_date": kwargs.get("date", "2026-04-13"),
-        "pickup_time": kwargs.get("time", "9:30 AM"),
-        "driver_name": "Rajesh Kumar",
-        "driver_phone": "+919876500001",
-        "pickup_address": kwargs.get("pickup_address", "B-101, Sterling City, Bopal, Ahmedabad"),
-        "workshop": "Kataria Automobiles, S.G. Highway, Ahmedabad",
-        "special_instructions": kwargs.get("special_instructions", ""),
-        "note": "Driver details will be sent via SMS on the morning of pickup."
+        "attending": bool(kwargs.get("attending")),
+        "guest_name": kwargs.get("guest_name", ""),
+        "note": kwargs.get("note", ""),
+        "event": EVENT,
     }
-
-def handle_get_service_cost_estimate(**kwargs):
-    estimates = {
-        "Third Service": {"min": 2500, "max": 3000, "includes": "Oil change, filter replacement, brake inspection, general checkup"},
-        "Second Service": {"min": 2000, "max": 2500, "includes": "Oil change, filter check, general inspection"},
-        "First Free Service": {"min": 0, "max": 0, "includes": "General inspection, fluid top-up (free under warranty)"},
-    }
-    service_type = kwargs.get("service_type", "Third Service")
-    return estimates.get(service_type, {"min": 2000, "max": 4000, "includes": "General service"})
 
 
 # Live transcript watchers (browser WebSockets watching phone calls)
@@ -171,9 +120,7 @@ async def websocket_endpoint(websocket: WebSocket):
         model=MODEL,
         input_sample_rate=16000,
         tool_mapping={
-            "get_vehicle_info": handle_get_vehicle_info,
-            "schedule_pickup": handle_schedule_pickup,
-            "get_service_cost_estimate": handle_get_service_cost_estimate,
+            "record_rsvp": handle_record_rsvp,
         }
     )
 
@@ -312,9 +259,7 @@ async def twilio_media_stream(websocket: WebSocket):
         model=MODEL,
         input_sample_rate=16000,
         tool_mapping={
-            "get_vehicle_info": handle_get_vehicle_info,
-            "schedule_pickup": handle_schedule_pickup,
-            "get_service_cost_estimate": handle_get_service_cost_estimate,
+            "record_rsvp": handle_record_rsvp,
         }
     )
 
@@ -343,7 +288,7 @@ async def twilio_media_stream(websocket: WebSocket):
     bridge = TwilioMediaBridge(
         websocket=websocket,
         gemini_client=gemini_client,
-        text_trigger="Hi, I have picked up the phone. Please start the call.",
+        text_trigger="[The guest has just answered the call. Greet them now with your invitation.]",
         on_event=broadcast_event,
     )
 
@@ -424,7 +369,7 @@ LIVE_DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Live Call Transcript</title>
+<title>EO Gujarat · Live Transcript</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -580,7 +525,7 @@ body::before {
 </head>
 <body>
 <div class="top-bar">
-  <span class="brand">Live Call Transcript</span>
+  <span class="brand">EO Gujarat · Live Transcript</span>
   <div class="status">
     <span class="dot" id="statusDot"></span>
     <span id="statusText">Waiting for call...</span>
@@ -861,7 +806,7 @@ tbody tr:hover{background:rgba(0,212,255,0.05);}
           <th data-k="duration_seconds" class="num">Duration</th>
           <th data-k="language">Lang</th>
           <th data-k="status">Status</th>
-          <th data-k="booking_created">Booking</th>
+          <th data-k="booking_created">Coming</th>
           <th data-k="gemini_cost_usd" class="num">Gemini $</th>
           <th data-k="twilio" class="num">Twilio $</th>
           <th data-k="total_cost_usd" class="num">Total $</th>
@@ -942,7 +887,7 @@ function renderStats(){
     {label:'Total real cost',value:fmtUSD(s.total_cost_usd),cls:'cy'},
     {label:'Avg cost / call',value:fmtUSD(s.avg_cost_per_call)},
     {label:'This month',value:fmtUSD2((s.this_month||{}).cost_usd),sub:'proj '+fmtUSD2(s.projected_month_cost)},
-    {label:'Booking conversion',value:fmtPct(s.booking_conversion_rate),cls:'gr',sub:(s.bookings||0)+' bookings'},
+    {label:'RSVP yes-rate',value:fmtPct(s.booking_conversion_rate),cls:'gr',sub:(s.bookings||0)+' coming'},
   ];
   $('stats').innerHTML=cards.map(c=>
     '<div class="stat '+(c.cls||'')+'"><div class="label">'+c.label+'</div><div class="value">'+c.value+'</div>'+

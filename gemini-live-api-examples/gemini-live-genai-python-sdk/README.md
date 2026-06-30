@@ -1,88 +1,81 @@
-# Gemini Live API - Python SDK & Vanilla JS
+# EO Gujarat — "An Evening with Radha" (Gemini Live voice demo)
 
-A demonstration of the Gemini Live API using the [Google Gen AI Python SDK](https://github.com/googleapis/python-genai) for the backend and vanilla JavaScript for the frontend. This example shows how to build a real-time multimodal application with a robust Python backend handling the API connection.
+A real-time **voice demo** built on the Gemini Live API ([Google Gen AI Python SDK](https://github.com/googleapis/python-genai)
+backend + vanilla-JS frontend). **Radha**, an AI host with a warm female **Indian-English** voice,
+calls a guest and personally invites them to the **EO Gujarat evening in Ahmedabad on the 10th of
+July**. The guest answers **"Yes"** or **"No"** out loud; Radha responds and her RSVP is captured
+live on screen. Calls can run **in the browser** or be placed to a **real phone via Twilio**.
+
+The FastAPI backend proxies the browser/phone WebSocket to Gemini, records each call, and tracks
+token + Twilio cost on an admin dashboard.
 
 ## Quick Start
 
-### 1. Backend Setup
-
-Install dependencies and start the FastAPI server using `uv`:
-
 ```bash
-# Create a virtual environment and install dependencies
+# 1. Create a virtual environment and install dependencies
 uv venv
-source .venv/bin/activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 uv pip install -r requirements.txt
 
-# Start the server
+# 2. Set your Gemini API key (a .env file is easiest — see .env.example)
+echo "GEMINI_API_KEY=your_api_key_here" > .env
+
+# 3. Start the server
 uv run main.py
+
+# 4. Open the demo and click "Start the call" (allow the microphone)
+#    http://localhost:8000
 ```
 
-### 2. Frontend
+## How the demo works
 
-Open your browser and navigate to:
+1. **Invite screen** — a branded EO Gujarat card. Click **Start the call** (browser), or enter a
+   number and **Get Radha to call your phone** (Twilio).
+2. **Radha greets first** — on connect she opens with her invitation and asks if she'll see you on
+   the 10th.
+3. **You answer by voice** — Radha replies warmly for *Yes* / graciously for *No*, and silently
+   calls the `record_rsvp` tool.
+4. **Live RSVP card + transcript + a glowing "Radha" orb** update in real time.
+5. **Call summary** — the end screen shows the decision, duration and full transcript.
 
-[http://localhost:8000](http://localhost:8000)
+## Customising
 
-## Features
+| What | Where |
+| --- | --- |
+| Radha's persona / script | `SYSTEM_INSTRUCTION` in `gemini_live.py` |
+| Voice (default **Aoede**, female) | `voice_name=` in `gemini_live.py` (`start_session`) |
+| Accent / language (default **en-IN**) | `language_code=` in `gemini_live.py` |
+| Model id | `MODEL` in `.env` (default `gemini-3.1-flash-live-preview`) |
+| RSVP tool | `record_rsvp` in `gemini_live.py` (declaration) + `handle_record_rsvp` in `main.py` |
+| Event details (date/city/host) | `frontend/index.html` + `EVENT` in `main.py` |
+| Branding / theme | `frontend/index.html`, `frontend/style.css` (gold-on-navy "evening" palette) |
 
-- **Google Gen AI SDK**: Uses the official Python SDK (`google-genai`) for simplified API interaction.
-- **FastAPI Backend**: Robust, async-ready web server handling WebSocket connections.
-- **Real-time Streaming**: Bi-directional audio and video streaming.
-- **Tool Use**: Demonstrates how to register and handle server-side tools.
-- **Vanilla JS Frontend**: Lightweight frontend with no build steps or framework dependencies.
+## Endpoints
 
-## Project Structure
-
-```
-/
-├── main.py             # FastAPI server & WebSocket endpoint
-├── gemini_live.py      # Gemini Live API wrapper using Gen AI SDK
-├── requirements.txt    # Python dependencies
-└── frontend/
-    ├── index.html      # User Interface
-    ├── main.js         # Application logic
-    ├── gemini-client.js # WebSocket client for backend communication
-    ├── media-handler.js # Audio/Video capture and playback
-    └── pcm-processor.js # AudioWorklet for PCM processing
-```
+| Route | Purpose |
+| --- | --- |
+| `GET /` | The invite / call UI |
+| `WS /ws` | Browser call (proxied to Gemini Live) |
+| `POST /call-me` | Place an outbound Twilio call to a phone number |
+| `GET/POST /twilio/voice`, `WS /twilio/media-stream` | Twilio phone-call bridge |
+| `GET /live`, `WS /live/ws` | Live transcript viewer for phone calls |
+| `GET /admin` (+ `/api/admin/*`) | Call logs + token/Twilio cost (key = `ANALYTICS_SECRET`) |
 
 ## Configuration
+Set values via environment variables or a `.env` file (see `.env.example`). At minimum set
+`GEMINI_API_KEY`. For the phone path, set the `TWILIO_*` values and a public `PUBLIC_URL` so Twilio
+can reach `/twilio/voice`.
 
-You can configure the application by setting environment variables or by using a `.env` file.
-
-**Important:** You must set the `GEMINI_API_KEY` to your Google AI Studio API key.
-
-1.  Create a `.env` file in the root directory.
-2.  Add your API key:
-
-```env
-GEMINI_API_KEY=your_api_key_here
+## Project structure
 ```
-
-Alternatively, you can set it in your shell:
-
-```bash
-export GEMINI_API_KEY=your_api_key_here
+/
+├── main.py            # FastAPI server: /ws, Twilio, /call-me, /live, /admin, EVENT data + record_rsvp
+├── gemini_live.py     # Gemini Live wrapper: Radha persona, record_rsvp tool, voice/accent
+├── recorder.py        # Per-call recording (RSVP outcome flag)
+├── store.py, pricing.py, twilio_handler.py
+└── frontend/
+    ├── index.html     # Invite / call / summary UI
+    ├── style.css      # EO Gujarat "evening" theme
+    ├── main.js        # App flow: orb, RSVP, transcript, Twilio "call me"
+    ├── gemini-client.js, media-handler.js, pcm-processor.js   # transport (unchanged)
 ```
-
-## Core Components
-
-### Backend (`gemini_live.py`)
-
-The `GeminiLive` class wraps the `genai.Client` to manage the session:
-
-```python
-# Connects using the SDK
-async with self.client.aio.live.connect(model=self.model, config=config) as session:
-    # Manages input/output queues
-    await asyncio.gather(
-        send_audio(),
-        send_video(),
-        receive_responses()
-    )
-```
-
-### Frontend (`gemini-client.js`)
-
-The frontend communicates with the FastAPI backend via WebSockets, sending base64-encoded media chunks and receiving audio responses.
