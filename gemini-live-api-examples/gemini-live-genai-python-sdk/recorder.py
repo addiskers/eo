@@ -9,6 +9,7 @@ a storage failure can never break an in-progress call.
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -73,7 +74,7 @@ class CallRecorder:
 
     # ---- lifecycle ---------------------------------------------------------
 
-    async def open(self, source, call_sid=None, caller=None):
+    async def open(self, source, call_sid=None, caller=None, generation=0):
         try:
             call_id = uuid.uuid4().hex[:16]
             if not call_sid:
@@ -82,8 +83,9 @@ class CallRecorder:
             self.call = {
                 "id": call_id,
                 "call_sid": call_sid,
-                "source": source,                 # 'twilio' | 'browser'
+                "source": source,                 # 'plivo' | 'browser'
                 "caller": caller,
+                "generation": int(generation or 0),  # 0=original, n=nth auto-callback redial
                 "started_at": self._started_ts.isoformat(),
                 "ended_at": None,
                 "duration_seconds": 0,
@@ -190,10 +192,54 @@ class CallRecorder:
             "result": result,
             "ts": _now_iso(),
         })
-        # Positive outcome for this demo = guest RSVP'd "yes" (reuses the
-        # existing booking_created flag so the admin dashboard keeps working).
-        if name == "record_rsvp" and isinstance(result, dict) and result.get("attending"):
-            self.call["booking_created"] = True
+        if name == "record_rsvp" and isinstance(result, dict):
+            status = result.get("outcome_status") or ("yes" if result.get("attending") else "no")
+            # Reuse the existing booking_created flag so the admin dashboard keeps working.
+            if result.get("attending") or status == "yes":
+                self.call["booking_created"] = True
+            self.call["rsvp_outcome_status"] = status
+            self.call["rsvp_callback_time_text"] = result.get("callback_time_text", "") or ""
+            self.call["rsvp_do_not_contact"] = bool(result.get("do_not_contact"))
+            self.call["rsvp_accompanying_children"] = result.get("accompanying_children", "") or ""
+            if status == "callback":
+                self._schedule_callback(result)
+            else:
+                # Outcome changed (e.g. maybe→yes): cancel any callback we'd queued.
+                cb = self.call.get("callback")
+                if cb and cb.get("status") == "pending":
+                    cb["status"] = "cancelled"
+
+    def _schedule_callback(self, result):
+        """Initialise the call's `callback` block; the scheduler picks it up after
+        close() persists it. Sets the dict only — never spawns a task here (sync)."""
+        try:
+            import callbacks
+            to = (self.call.get("caller") or "").strip()
+            if not to:
+                logger.info("Callback requested but no caller number; not scheduling")
+                return
+            cur_gen = int(self.call.get("generation") or 0)
+            try:
+                max_gen = int(os.getenv("CALLBACK_MAX_GENERATIONS", "1"))
+            except ValueError:
+                max_gen = 1
+            if cur_gen >= max_gen:
+                logger.info(f"Callback generation cap reached (gen={cur_gen}); not re-scheduling")
+                return
+            due_at, due_source = callbacks.compute_due_at(
+                result.get("callback_time_iso"),
+                result.get("callback_time_text") or result.get("note") or "")
+            self.call["callback"] = callbacks.new_callback_record(
+                to=to,
+                due_at=due_at,
+                source_text=result.get("callback_time_text") or "",
+                due_source=due_source,
+                origin_call_id=self.call.get("id"),
+                generation=cur_gen + 1,
+            )
+            logger.info(f"Scheduled callback for {to} at {due_at} (source={due_source}, gen={cur_gen + 1})")
+        except Exception as e:
+            logger.warning(f"Failed to schedule callback: {e}")
 
     def _accumulate_usage(self, event):
         snap = {

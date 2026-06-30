@@ -116,6 +116,7 @@ class PlivoMediaBridge:
         self.stream_id = None
         self.call_id = ""
         self.caller = ""
+        self.generation = 0
         self.text_trigger = text_trigger
         self.on_event = on_event  # async callback for live transcript
 
@@ -195,19 +196,20 @@ class PlivoMediaBridge:
     # ---- inbound (Plivo -> Gemini) ----
 
     @staticmethod
-    def _extract_caller(data: dict, start: dict) -> str:
+    def _extract_header(data: dict, start: dict, name: str) -> str:
+        name = name.lower()
         raw = (data.get("extra_headers") or data.get("extraHeaders")
                or start.get("extra_headers") or start.get("extraHeaders"))
         if isinstance(raw, dict):
             for k, v in raw.items():
-                if str(k).strip().lower() == "x-caller":
+                if str(k).strip().lower() == name:
                     return unquote(str(v))
             return ""
         if isinstance(raw, str) and raw:
             for pair in raw.split(","):
                 if "=" in pair:
                     k, v = pair.split("=", 1)
-                    if k.strip().lower() == "x-caller":
+                    if k.strip().lower() == name:
                         return unquote(v.strip())
         return ""
 
@@ -224,13 +226,19 @@ class PlivoMediaBridge:
                     self.stream_id = str(start.get("streamId") or start.get("stream_id")
                                          or data.get("streamId") or "")
                     self.call_id = str(start.get("callId") or start.get("call_id") or "")
-                    self.caller = self._extract_caller(data, start)
+                    self.caller = self._extract_header(data, start, "x-caller")
+                    gen_raw = self._extract_header(data, start, "x-callback-gen")
+                    try:
+                        self.generation = int(gen_raw) if gen_raw else 0
+                    except ValueError:
+                        self.generation = 0
                     logger.info(f"Plivo stream started: stream_id={self.stream_id}, "
-                                f"call={self.call_id}, caller={self.caller}")
+                                f"call={self.call_id}, caller={self.caller}, gen={self.generation}")
                     if not self._started:
                         self._started = True
                         await self._emit({"type": "call_start", "call_sid": self.call_id or "",
-                                          "caller": self.caller or ""})
+                                          "caller": self.caller or "",
+                                          "generation": self.generation})
                     # Trigger the AI to start talking
                     await self.text_input_queue.put(self.text_trigger)
 

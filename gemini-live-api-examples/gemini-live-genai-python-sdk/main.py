@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import secrets
+from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
 from dotenv import load_dotenv
@@ -16,7 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
 from plivo_handler import PlivoMediaBridge
 
+import dialer
 import pricing
+import scheduler
 import store
 from recorder import CallRecorder
 
@@ -47,12 +50,21 @@ EVENT = {
 }
 
 def handle_record_rsvp(**kwargs):
-    """The agent calls this the moment the guest says Yes or No."""
+    """The agent calls this once per call with the RSVP outcome."""
+    status = (kwargs.get("outcome_status") or "").strip().lower()
+    if status not in ("yes", "no", "callback", "do_not_contact"):
+        # Back-compat: derive from the legacy `attending` boolean.
+        status = "yes" if kwargs.get("attending") else "no"
     return {
         "success": True,
-        "attending": bool(kwargs.get("attending")),
-        "guest_name": kwargs.get("guest_name", ""),
-        "note": kwargs.get("note", ""),
+        "outcome_status": status,
+        "attending": status == "yes",
+        "callback_time_text": kwargs.get("callback_time_text", "") or "",
+        "callback_time_iso": kwargs.get("callback_time_iso", "") or "",
+        "do_not_contact": status == "do_not_contact",
+        "accompanying_children": kwargs.get("accompanying_children", "") or "",
+        "guest_name": kwargs.get("guest_name", "") or "",
+        "note": kwargs.get("note", "") or "",
         "event": EVENT,
     }
 
@@ -77,12 +89,30 @@ app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 @app.on_event("startup")
 async def _startup():
-    """Initialize the call store and clean up any calls orphaned by a crash."""
+    """Initialize the call store, recover orphans, and start the callback scheduler."""
     try:
         await store.init()
         await store.sweep_stale()
+        await store.reset_orphaned_callbacks()
     except Exception as e:
         logger.error(f"Call store init failed: {e}")
+    try:
+        app.state.callback_task = asyncio.create_task(scheduler.run_loop())
+    except Exception as e:
+        logger.error(f"Failed to start callback scheduler: {e}")
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    task = getattr(app.state, "callback_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
 
 @app.get("/")
@@ -248,7 +278,16 @@ async def plivo_answer(request: Request):
     ws_url = f"{'wss' if secure else 'ws'}://{host}/plivo/media-stream"
 
     caller = request.query_params.get("caller", "")
-    extra_headers = f"X-Caller={quote(caller)}" if caller else ""
+    gen = request.query_params.get("gen", "")
+    origin = request.query_params.get("origin", "")
+    hdr_pairs = []
+    if caller:
+        hdr_pairs.append(f"X-Caller={quote(caller)}")
+    if gen:
+        hdr_pairs.append(f"X-Callback-Gen={quote(gen)}")
+    if origin:
+        hdr_pairs.append(f"X-Callback-Origin={quote(origin)}")
+    extra_headers = ",".join(hdr_pairs)
     eh_attr = f' extraHeaders="{extra_headers}"' if extra_headers else ""
 
     # Plivo <Stream>: URL is the element TEXT (not a url= attr); audioTrack must be
@@ -287,7 +326,8 @@ async def plivo_media_stream(websocket: WebSocket):
         etype = event.get("type")
         if etype == "call_start":
             await recorder.open(source="plivo", call_sid=event.get("call_sid") or None,
-                                caller=event.get("caller"))
+                                caller=event.get("caller"),
+                                generation=event.get("generation", 0))
         elif etype == "call_end":
             await recorder.close()
         else:
@@ -323,43 +363,11 @@ async def plivo_media_stream(websocket: WebSocket):
 @app.post("/call-me")
 async def call_me(request: Request):
     """Make Plivo call a phone number and connect to the AI agent."""
-    import plivo
-
     body = await request.json()
     to_number = body.get("phone")
     if not to_number:
         return {"error": "Missing 'phone' field. Send {\"phone\": \"+91XXXXXXXXXX\"}"}
-
-    if not PLIVO_AUTH_ID or not PLIVO_AUTH_TOKEN:
-        return {"error": "Plivo credentials not configured"}
-    if not PLIVO_FROM_NUMBER:
-        return {"error": "PLIVO_FROM_NUMBER not configured"}
-
-    # Plivo must be able to reach the answer webhook publicly (not localhost).
-    public_url = os.getenv("PUBLIC_URL", "")
-    if public_url:
-        base = public_url.rstrip("/")
-    else:
-        host = request.headers.get("host", "localhost")
-        protocol = "https" if "onrender.com" in host else request.url.scheme
-        base = f"{protocol}://{host}"
-    answer_url = f"{base}/plivo/answer?caller={quote(to_number)}"
-
-    try:
-        client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
-        resp = client.calls.create(
-            from_=PLIVO_FROM_NUMBER,
-            to_=to_number,
-            answer_url=answer_url,
-            answer_method="GET",
-        )
-        call_uuid = getattr(resp, "request_uuid", None) or (
-            resp.get("request_uuid") if isinstance(resp, dict) else None)
-        logger.info(f"Outbound Plivo call initiated: {call_uuid} to {to_number}")
-        return {"success": True, "call_uuid": call_uuid, "to": to_number}
-    except Exception as e:
-        logger.error(f"Failed to initiate Plivo call: {e}")
-        return {"error": str(e)}
+    return await dialer.place_call(to_number, request=request)
 
 
 # ============ LIVE TRANSCRIPT DASHBOARD ============
@@ -829,6 +837,7 @@ tbody tr:hover{background:rgba(0,212,255,0.05);}
           <th data-k="language">Lang</th>
           <th data-k="status">Status</th>
           <th data-k="booking_created">Coming</th>
+          <th data-k="rsvp_outcome_status">RSVP</th>
           <th data-k="gemini_cost_usd" class="num">Gemini $</th>
           <th data-k="twilio" class="num">Twilio $</th>
           <th data-k="total_cost_usd" class="num">Total $</th>
@@ -837,6 +846,20 @@ tbody tr:hover{background:rgba(0,212,255,0.05);}
       </table>
     </div>
     <div id="count" class="section-title" style="margin-top:10px;"></div>
+
+    <div class="section-title">Callbacks
+      <button class="btn ghost" id="schedToggleBtn" style="margin-left:10px;font-size:0.66rem;">Scheduler</button>
+      <span id="schedPaused" style="margin-left:8px;color:#f59e0b;font-size:0.7rem;"></span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>Member</th><th>Requested</th><th>Due</th><th>Status</th>
+          <th class="num">Attempts</th><th>Last error</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="cbRows"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -874,6 +897,42 @@ const fmtPct=(x)=>(x==null||isNaN(x))?'—':(x*100).toFixed(1)+'%';
 function fmtDur(s){s=s||0;const m=Math.floor(s/60),r=Math.round(s%60);return m+':'+String(r).padStart(2,'0');}
 function fmtDT(iso){if(!iso)return '—';const d=new Date(iso);return d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function rsvpPill(s){if(!s)return '<span class="dash">—</span>';const col={yes:'#10b981',no:'#ef4444',callback:'#f59e0b',do_not_contact:'#94a3b8'}[s]||'#94a3b8';return '<span class="pill" style="background:'+col+'22;color:'+col+'">'+esc(s)+'</span>';}
+function cbPill(s){const col={pending:'#f59e0b',in_flight:'#00d4ff',completed:'#10b981',failed:'#ef4444',cancelled:'#94a3b8'}[s]||'#94a3b8';return '<span class="pill" style="background:'+col+'22;color:'+col+'">'+esc(s||'')+'</span>';}
+
+/* ---------- callbacks ---------- */
+async function loadCallbacks(){
+  try{
+    const r=await api('/api/admin/callbacks').then(r=>r.json());
+    renderCallbacks(r);
+  }catch(e){if(e.message!=='unauthorized')console.error(e);}
+}
+function renderCallbacks(r){
+  const items=r.items||[];
+  const btn=$('schedToggleBtn');
+  if(btn){btn.textContent=r.scheduler_enabled?'Scheduler: ON':'Scheduler: OFF';btn.dataset.on=r.scheduler_enabled?'1':'0';}
+  const pe=$('schedPaused');if(pe)pe.textContent=r.paused_until?('paused until '+fmtDT(r.paused_until)):'';
+  const tb=$('cbRows');
+  if(!items.length){tb.innerHTML='<tr><td colspan="7"><div class="empty">No callbacks</div></td></tr>';return;}
+  tb.innerHTML=items.map(c=>{
+    const cb=c.callback||{};
+    let act='—';
+    if(cb.status==='pending'||cb.status==='failed')act='<button class="btn ghost" onclick="cbCallNow(event,\\''+c.id+'\\')">Call now</button> <button class="btn ghost" onclick="cbCancel(event,\\''+c.id+'\\')">Cancel</button>';
+    else if(cb.status==='in_flight')act='<button class="btn ghost" onclick="cbCancel(event,\\''+c.id+'\\')">Cancel</button>';
+    return '<tr>'+
+      '<td>'+esc(cb.to||c.caller||'—')+'</td>'+
+      '<td>'+esc(cb.source_text||'')+'</td>'+
+      '<td>'+fmtDT(cb.due_at)+'</td>'+
+      '<td>'+cbPill(cb.status)+'</td>'+
+      '<td class="num">'+(cb.attempts||0)+'/'+(cb.max_attempts||3)+'</td>'+
+      '<td>'+esc(cb.last_error||'')+'</td>'+
+      '<td>'+act+'</td>'+
+    '</tr>';
+  }).join('');
+}
+async function cbCancel(e,id){e.stopPropagation();try{await api('/api/admin/callbacks/'+id+'/cancel',{method:'POST'});toast('Callback cancelled','success');loadCallbacks();}catch(err){if(err.message!=='unauthorized')toast('Cancel failed','error');}}
+async function cbCallNow(e,id){e.stopPropagation();try{await api('/api/admin/callbacks/'+id+'/call-now',{method:'POST'});toast('Queued for callback','success');loadCallbacks();}catch(err){if(err.message!=='unauthorized')toast('Failed','error');}}
+async function schedToggle(){const on=$('schedToggleBtn').dataset.on==='1';try{const r=await api('/api/admin/scheduler/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!on})}).then(r=>r.json());toast('Scheduler '+(r.enabled?'enabled':'disabled'),'info');loadCallbacks();}catch(err){if(err.message!=='unauthorized')toast('Toggle failed','error');}}
 
 /* ---------- loaders ---------- */
 async function loadAll(){
@@ -882,7 +941,7 @@ async function loadAll(){
     api('/api/admin/calls'+filterQS()).then(r=>r.json()),
   ]);
   state.summary=sum;state.calls=calls.items||[];
-  renderStats();renderTrend();renderBreakdown();renderRows();
+  renderStats();renderTrend();renderBreakdown();renderRows();loadCallbacks();
   $('updated').textContent='Updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 function filterQS(){
@@ -982,7 +1041,7 @@ function renderRows(){
     return (av-bv)*mul;
   });
   $('count').textContent=rows.length+' call'+(rows.length===1?'':'s');
-  if(!rows.length){tb.innerHTML='<tr><td colspan="10"><div class="empty">No calls match your filters</div></td></tr>';return;}
+  if(!rows.length){tb.innerHTML='<tr><td colspan="11"><div class="empty">No calls match your filters</div></td></tr>';return;}
   tb.innerHTML=rows.map(c=>{
     const tw=(c.twilio||{}).price_usd;
     const est=c.cost_estimated?'<span class="est" title="estimated">~</span>':'';
@@ -994,6 +1053,7 @@ function renderRows(){
       '<td>'+esc(c.language||'—')+'</td>'+
       '<td><span class="pill '+esc(c.status||'')+'">'+esc(c.status||'')+'</span></td>'+
       '<td>'+(c.booking_created?'<span class="tick">✓</span>':'<span class="dash">—</span>')+'</td>'+
+      '<td>'+rsvpPill(c.rsvp_outcome_status)+'</td>'+
       '<td class="num">'+fmtUSD(c.gemini_cost_usd)+'</td>'+
       '<td class="num">'+(tw==null?'<span class="dash">—</span>':fmtUSD(tw))+'</td>'+
       '<td class="num">'+fmtUSD(c.total_cost_usd)+est+'</td>'+
@@ -1089,6 +1149,7 @@ $('keyInput').addEventListener('keypress',e=>{if(e.key==='Enter')login();});
 $('logoutBtn').onclick=logout;
 $('refreshBtn').onclick=refreshCosts;
 $('csvBtn').onclick=exportCSV;
+$('schedToggleBtn').onclick=schedToggle;
 $('sourceFilter').onchange=fetchCalls;
 $('fromDate').onchange=fetchCalls;
 $('toDate').onchange=fetchCalls;
@@ -1257,6 +1318,66 @@ async def admin_call_refresh(call_id: str, request: Request):
     require_admin(request)
     updated = await _refresh_call_price(call_id)
     return {"updated": bool(updated)}
+
+
+# ============ CALLBACK MANAGEMENT ============
+
+@app.get("/api/admin/callbacks")
+async def admin_callbacks(request: Request):
+    require_admin(request)
+    qp = request.query_params
+    statuses = None
+    if qp.get("status"):
+        statuses = set(s.strip() for s in qp["status"].split(",") if s.strip())
+    items = await store.list_callbacks(statuses)
+    state = await store.load_scheduler_state()
+    return JSONResponse({
+        "items": items,
+        "scheduler_enabled": scheduler.is_enabled(),
+        "paused_until": state.get("paused_until"),
+    })
+
+
+@app.post("/api/admin/callbacks/{call_id}/cancel")
+async def admin_callback_cancel(call_id: str, request: Request):
+    require_admin(request)
+    call = await store.load_call(call_id)
+    if not call or not call.get("callback"):
+        raise HTTPException(status_code=404, detail="Callback not found")
+    call["callback"]["status"] = "cancelled"
+    await store.save_call(call)
+    return {"ok": True}
+
+
+@app.post("/api/admin/callbacks/{call_id}/call-now")
+async def admin_callback_call_now(call_id: str, request: Request):
+    require_admin(request)
+    call = await store.load_call(call_id)
+    if not call or not call.get("callback"):
+        raise HTTPException(status_code=404, detail="Callback not found")
+    cb = call["callback"]
+    if cb.get("status") in ("in_flight", "completed"):
+        return {"ok": False, "error": f"callback is {cb.get('status')}"}
+    cb["status"] = "pending"
+    cb["due_at"] = datetime.now(timezone.utc).isoformat()
+    cb["next_retry_at"] = None
+    cb["attempts"] = 0          # operator override → give it fresh attempts
+    cb["last_error"] = None
+    await store.save_call(call)
+    return {"ok": True}
+
+
+@app.post("/api/admin/scheduler/toggle")
+async def admin_scheduler_toggle(request: Request):
+    require_admin(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    enabled = bool(body.get("enabled", not scheduler.is_enabled()))
+    scheduler.set_override(enabled)
+    return {"ok": True, "enabled": enabled}
 
 
 if __name__ == "__main__":

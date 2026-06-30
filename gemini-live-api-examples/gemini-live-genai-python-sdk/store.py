@@ -15,6 +15,7 @@ behind this module so it can be swapped for SQLite/Postgres later.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -23,8 +24,9 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(__file__), "data")
 CALLS_DIR = os.path.join(DATA_DIR, "calls")
+SCHED_STATE_PATH = os.path.join(DATA_DIR, "scheduler_state.json")
 
 # call_id -> lightweight meta (full record minus transcript/tool_calls)
 _INDEX = {}
@@ -35,7 +37,9 @@ _HEAVY_FIELDS = ("transcript", "tool_calls")
 
 
 def _meta_from_call(call):
-    return {k: v for k, v in call.items() if k not in _HEAVY_FIELDS}
+    # Deep-copy so the in-memory index never aliases mutable nested dicts
+    # (e.g. `callback`, `tokens`, `twilio`) that live callers may still mutate.
+    return copy.deepcopy({k: v for k, v in call.items() if k not in _HEAVY_FIELDS})
 
 
 def _path(call_id):
@@ -246,3 +250,95 @@ async def sweep_stale(max_age_minutes=30):
             call["status"] = "abandoned"
             await save_call(call)
             logger.info(f"Marked stale call {cid} as abandoned")
+
+
+# ---- callbacks -------------------------------------------------------------
+
+def _parse_iso(s):
+    try:
+        return datetime.fromisoformat(str(s))
+    except (TypeError, ValueError):
+        return None
+
+
+async def list_pending_callbacks(now_iso):
+    """Deep-copied metas with a pending callback whose due_at (and next_retry_at)
+    have passed, oldest-due first. Safe read snapshot — never aliases _INDEX."""
+    now = _parse_iso(now_iso)
+    with _LOCK:
+        metas = [copy.deepcopy(m) for m in _INDEX.values() if m.get("callback")]
+    out = []
+    for m in metas:
+        cb = m["callback"]
+        if cb.get("status") != "pending" or not cb.get("due_at"):
+            continue
+        due = _parse_iso(cb["due_at"])
+        if due is None or (now is not None and due > now):
+            continue
+        nr = _parse_iso(cb.get("next_retry_at")) if cb.get("next_retry_at") else None
+        if nr is not None and now is not None and now < nr:
+            continue
+        out.append(m)
+    out.sort(key=lambda x: x["callback"].get("due_at") or "")
+    return out
+
+
+async def list_callbacks(statuses=None):
+    """All calls that have a callback block, optionally filtered by status set."""
+    with _LOCK:
+        metas = [copy.deepcopy(m) for m in _INDEX.values() if m.get("callback")]
+    if statuses:
+        metas = [m for m in metas if m["callback"].get("status") in statuses]
+    metas.sort(key=lambda m: m["callback"].get("due_at") or "")
+    return metas
+
+
+async def reset_orphaned_callbacks():
+    """Boot recovery: an `in_flight` callback was claimed but the process died.
+    If it already has a result_call_id it was dialed -> completed; else -> pending."""
+    with _LOCK:
+        ids = [cid for cid, m in _INDEX.items()
+               if (m.get("callback") or {}).get("status") == "in_flight"]
+    for cid in ids:
+        call = await load_call(cid)
+        if not call:
+            continue
+        cb = call.get("callback") or {}
+        if cb.get("status") != "in_flight":
+            continue
+        if cb.get("result_call_id"):
+            cb["status"] = "completed"          # was already dialed before the crash
+        else:
+            cb["status"] = "pending"
+            cb["last_error"] = "reset_on_boot"
+        await save_call(call)
+        logger.info(f"Reset orphaned callback {cid} -> {cb['status']}")
+
+
+# ---- scheduler state (durable circuit-breaker etc.) ------------------------
+
+def _load_sched_state_sync():
+    try:
+        with open(SCHED_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning(f"Failed to load scheduler state: {e}")
+        return {}
+
+
+def _save_sched_state_sync(state):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = SCHED_STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, SCHED_STATE_PATH)
+
+
+async def load_scheduler_state():
+    return await _run(_load_sched_state_sync)
+
+
+async def save_scheduler_state(state):
+    await _run(_save_sched_state_sync, state)
