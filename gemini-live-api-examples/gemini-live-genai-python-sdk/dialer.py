@@ -92,9 +92,13 @@ async def hangup_call(call_uuid):
         return {"error": "Plivo credentials not configured"}
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _hangup_sync, call_uuid)
+        await asyncio.wait_for(
+            loop.run_in_executor(None, _hangup_sync, call_uuid), timeout=15)
         logger.info(f"Hung up Plivo call {call_uuid}")
         return {"success": True}
+    except asyncio.TimeoutError:
+        logger.warning(f"Hangup timed out for {call_uuid}")
+        return {"error": "hangup timeout"}
     except Exception as e:
         logger.error(f"Hangup failed for {call_uuid}: {e}")
         return {"error": str(e)}

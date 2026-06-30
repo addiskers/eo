@@ -130,6 +130,7 @@ class PlivoMediaBridge:
         self._out_frames = asyncio.Queue()
         self._residual = bytearray()
         self._started = False
+        self._call_end_emitted = False
 
     # ---- outbound (Gemini -> Plivo) ----
 
@@ -305,12 +306,12 @@ class PlivoMediaBridge:
         except asyncio.CancelledError:
             pass
 
-    async def run(self):
-        """Run the bridge: Plivo <-> Gemini."""
-        plivo_task = asyncio.create_task(self.handle_plivo_messages())
-        sender_task = asyncio.create_task(self._outbound_sender())
-        guard_task = asyncio.create_task(self._max_duration_guard())
-
+    async def _gemini_loop(self):
+        """Drive the Gemini Live session. Returns when the agent ends the call
+        (end_call -> drain + hangup) or on a Gemini error/stream end. When the
+        caller hangs up first, run() cancels this task; CancelledError then
+        propagates into start_session's async generator, whose finally closes the
+        live session immediately (so the AI is never left 'on hold')."""
         try:
             async for event in self.gemini.start_session(
                 audio_input_queue=self.audio_input_queue,
@@ -327,14 +328,41 @@ class PlivoMediaBridge:
                         break
                     if etype == "end_call":
                         logger.info("Agent requested end_call; hanging up")
-                        await self._drain_then_hangup()
+                        # Shield so a caller hangup mid-goodbye can't abandon the hangup.
+                        await asyncio.shield(self._drain_then_hangup())
                         break
+        except asyncio.CancelledError:
+            raise                          # caller hung up: let the generator finally close the session
         except Exception as e:
             logger.error(f"Gemini session error: {e}")
+
+    async def run(self):
+        """Run the bridge: Plivo <-> Gemini.
+
+        Race the Gemini loop against the Plivo receive loop (and the max-duration
+        guard). Whichever finishes first — caller hangup, agent end_call, or the
+        guard — the finally cancels the rest, so the Gemini session never lingers
+        billing after the caller leaves.
+        """
+        gemini_task = asyncio.create_task(self._gemini_loop())
+        plivo_task = asyncio.create_task(self.handle_plivo_messages())
+        sender_task = asyncio.create_task(self._outbound_sender())
+        guard_task = asyncio.create_task(self._max_duration_guard())
+
+        try:
+            await asyncio.wait(
+                {gemini_task, plivo_task, guard_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         finally:
-            if self._started:
+            for task in (gemini_task, plivo_task, sender_task, guard_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                gemini_task, plivo_task, sender_task, guard_task,
+                return_exceptions=True,
+            )
+            if self._started and not self._call_end_emitted:
+                self._call_end_emitted = True
                 await self._emit({"type": "call_end"})
-            plivo_task.cancel()
-            sender_task.cancel()
-            guard_task.cancel()
             logger.info("Plivo-Gemini bridge closed")
