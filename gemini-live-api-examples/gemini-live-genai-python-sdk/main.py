@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import secrets
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -233,9 +233,19 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.api_route("/plivo/answer", methods=["GET", "POST"])
 async def plivo_answer(request: Request):
     """Plivo answer webhook: returns streaming XML when the callee picks up."""
-    host = request.headers.get("host", "localhost")
-    protocol = "wss" if request.url.scheme == "https" or "onrender.com" in host or "globalvoxinc.ai" in host else "ws"
-    ws_url = f"{protocol}://{host}/plivo/media-stream"
+    # Prefer PUBLIC_URL (most reliable behind tunnels/proxies); else infer from the
+    # request, honouring X-Forwarded-Proto so we still pick wss behind nginx/ngrok.
+    public_url = os.getenv("PUBLIC_URL", "").rstrip("/")
+    if public_url:
+        parsed = urlparse(public_url)
+        host = parsed.netloc
+        secure = parsed.scheme == "https"
+    else:
+        host = request.headers.get("host", "localhost")
+        xf_proto = request.headers.get("x-forwarded-proto", "")
+        secure = (request.url.scheme == "https" or xf_proto == "https"
+                  or "onrender.com" in host or "globalvoxinc.ai" in host)
+    ws_url = f"{'wss' if secure else 'ws'}://{host}/plivo/media-stream"
 
     caller = request.query_params.get("caller", "")
     extra_headers = f"X-Caller={quote(caller)}" if caller else ""
